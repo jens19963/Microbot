@@ -156,6 +156,8 @@ public class Rs2Walker {
     private static final int PATH_ADJ_COMPONENT_LINK_MAX_TILE_GAP = 6;
     private static final int PATH_ADJ_COMPONENT_LINK_MAX_EDGE_GAP = 6;
     private static final int SEGMENT_DOOR_FAMILY_MARK_RADIUS = 2;
+    private static final int UNREACHABLE_DOOR_RECOVERY_BACKTRACK_EDGES = 2;
+    private static final int UNREACHABLE_DOOR_RECOVERY_LOOKAHEAD_EDGES = 10;
     private static final long POST_TRANSPORT_PATH_TMARK_WINDOW_MS = 15_000L;
     private static final long POST_TRANSPORT_OFFPATH_WAIT_BUDGET_MS = 2_500L;
     private static final int POST_TRANSPORT_OFFPATH_WAIT_SLICE_MS = 450;
@@ -1638,6 +1640,15 @@ public class Rs2Walker {
                                     exitReason = "door-handled-path-adj-scan";
                                     break;
                                 }
+                            }
+                            if (hasUnresolvedDoorLikeObjectNearRawPath(rawPath, rawEdgeStart, playerLoc,
+                                    UNREACHABLE_DOOR_RECOVERY_BACKTRACK_EDGES,
+                                    UNREACHABLE_DOOR_RECOVERY_LOOKAHEAD_EDGES,
+                                    HANDLER_RANGE)) {
+                                WebWalkLog.spInfo("door_recovery_suppressed | reason=nearby-route-door idx={} tile={}",
+                                        rawEdgeStart, compactWorldPoint(currentWorldPoint));
+                                exitReason = "door-recovery-suppressed";
+                                break;
                             }
 
                             // Door/obstacle detection above found nothing to open. The local
@@ -4887,6 +4898,86 @@ public class Rs2Walker {
         return false;
     }
 
+    private static boolean hasUnresolvedDoorLikeObjectNearRawPath(List<WorldPoint> rawPath,
+                                                                  int rawEdgeStart,
+                                                                  WorldPoint playerLoc,
+                                                                  int backtrackEdges,
+                                                                  int lookaheadEdges,
+                                                                  int radiusTiles) {
+        if (rawPath == null || rawPath.size() < 2 || playerLoc == null || rawEdgeStart < 0) {
+            return false;
+        }
+
+        int start = Math.max(0, rawEdgeStart - Math.max(0, backtrackEdges));
+        int endExclusive = Math.min(rawPath.size() - 1, rawEdgeStart + Math.max(1, lookaheadEdges));
+        for (int ri = start; ri < endExclusive && ri < rawPath.size() - 1; ri++) {
+            WorldPoint from = rawPath.get(ri);
+            WorldPoint to = rawPath.get(ri + 1);
+            if (from == null || to == null) {
+                continue;
+            }
+            if (from.getPlane() != playerLoc.getPlane() || to.getPlane() != playerLoc.getPlane()) {
+                break;
+            }
+            if (from.distanceTo2D(playerLoc) > radiusTiles && to.distanceTo2D(playerLoc) > radiusTiles) {
+                continue;
+            }
+            if (isCatalogBackedTransportSegment(rawPath, ri) && !isDoorLikeCatalogTransportSegment(rawPath, ri)) {
+                continue;
+            }
+            if (hasUnresolvedDoorLikeSceneObjectOnSegment(from, to, playerLoc, radiusTiles)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasUnresolvedDoorLikeSceneObjectOnSegment(WorldPoint fromWp, WorldPoint toWp,
+                                                                     WorldPoint playerLoc, int radiusTiles) {
+        if (fromWp == null || toWp == null || playerLoc == null || radiusTiles <= 0) {
+            return false;
+        }
+        if (fromWp.getPlane() != toWp.getPlane() || fromWp.getPlane() != playerLoc.getPlane()) {
+            return false;
+        }
+
+        for (WallObject wall : Rs2GameObject.getWallObjects(o -> true, playerLoc, radiusTiles)) {
+            if (isUnresolvedRouteDoorObject(wall, fromWp, toWp, playerLoc, radiusTiles)) {
+                return true;
+            }
+        }
+        for (GameObject object : Rs2GameObject.getGameObjects(o -> true, playerLoc, radiusTiles)) {
+            if (isUnresolvedRouteDoorObject(object, fromWp, toWp, playerLoc, radiusTiles)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isUnresolvedRouteDoorObject(TileObject object, WorldPoint fromWp, WorldPoint toWp,
+                                                       WorldPoint playerLoc, int radiusTiles) {
+        if (object == null || object.getWorldLocation() == null) {
+            return false;
+        }
+        WorldPoint location = object.getWorldLocation();
+        if (location.getPlane() != playerLoc.getPlane()
+                || location.distanceTo2D(playerLoc) > radiusTiles
+                || (isCatalogTransportObject(object) && !isDoorLikeSceneObject(object))
+                || !isDoorOnSegment(object, fromWp, toWp)) {
+            return false;
+        }
+
+        ObjectComposition comp = resolveCompositionForDoorProbe(object);
+        if (comp == null
+                || isNullOrPlaceholderObjectName(comp.getName())
+                || doorCompositionSpecifiesOnlyCloseOrShut(comp)) {
+            return false;
+        }
+        String action = pickWalkDoorAction(comp);
+        return isDoorLikeGameObjectName(comp.getName())
+                || (action != null && doorActionPriorityIndex(action) < Integer.MAX_VALUE);
+    }
+
     private static boolean isPendingRouteDoorObject(TileObject object, WorldPoint fromWp, WorldPoint toWp,
                                                     WorldPoint playerLoc, int radiusTiles) {
         if (object == null || object.getWorldLocation() == null) {
@@ -5548,14 +5639,15 @@ public class Rs2Walker {
             }
 			return true;
 		}
-        if (bestLoc != null && shouldBlacklistDoorAfterWrongTraversal(posBefore, posAfter, bestFrom, bestTo)) {
-            sessionBlacklistedDoors.add(bestLoc);
-            log.warn("[Walker] Blacklisting door after wrong traversal: door={} from={} to={} before={} after={}",
+        boolean wrongTraversal = bestLoc != null && shouldBlacklistDoorAfterWrongTraversal(posBefore, posAfter, bestFrom, bestTo);
+        if (wrongTraversal) {
+            log.warn("[Walker] Path-adj door traversed wrong way; not session-blacklisting fallback candidate: door={} from={} to={} before={} after={}",
                     bestLoc, bestFrom, bestTo, posBefore, posAfter);
-        }
-        for (WorldPoint loc : bestComponent.locations) {
-            if (loc != null) {
-                markStationaryDoorOpened(loc);
+        } else {
+            for (WorldPoint loc : bestComponent.locations) {
+                if (loc != null) {
+                    markStationaryDoorOpened(loc);
+                }
             }
         }
 		log.debug("[Walker] path-adj blocker-scan interact did not traverse (at={} from={} to={} before={} after={})",
