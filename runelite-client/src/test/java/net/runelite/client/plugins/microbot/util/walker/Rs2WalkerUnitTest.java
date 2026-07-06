@@ -417,6 +417,20 @@ public class Rs2WalkerUnitTest {
     }
 
     @Test
+    public void wallDoorTouchesSegment_diagonalStepThroughGateCorner_returnsTrue() {
+        WallObject gate = mock(WallObject.class);
+        when(gate.getWorldLocation()).thenReturn(new WorldPoint(3240, 3302, 0));
+        when(gate.getOrientationA()).thenReturn(4); // gate blocks 3240,3302 <-> 3241,3302
+
+        assertTrue(Rs2Walker.wallDoorTouchesSegment(gate,
+                new WorldPoint(3240, 3301, 0),
+                new WorldPoint(3241, 3302, 0)));
+        assertTrue(Rs2Walker.wallDoorTouchesSegment(gate,
+                new WorldPoint(3241, 3302, 0),
+                new WorldPoint(3240, 3301, 0)));
+    }
+
+    @Test
     public void wallDoorTouchesSegment_startingBesideDoorAndMovingAway_returnsFalse() {
         WallObject door = mock(WallObject.class);
         when(door.getWorldLocation()).thenReturn(new WorldPoint(3123, 3361, 0));
@@ -426,6 +440,51 @@ public class Rs2WalkerUnitTest {
                 Rs2Walker.wallDoorTouchesSegment(door,
                         new WorldPoint(3123, 3360, 0),
                         new WorldPoint(3122, 3359, 0)));
+    }
+
+    @Test
+    public void isDoorEdgeNudgeResolved_movesToWrongNeighbor_returnsFalse() {
+        assertFalse(Rs2Walker.isDoorEdgeNudgeResolved(
+                new WorldPoint(3240, 3301, 0),
+                new WorldPoint(3239, 3302, 0),
+                new WorldPoint(3240, 3301, 0),
+                new WorldPoint(3241, 3302, 0)));
+    }
+
+    @Test
+    public void isDoorEdgeNudgeResolved_crossesToDoorTarget_returnsTrue() {
+        assertTrue(Rs2Walker.isDoorEdgeNudgeResolved(
+                new WorldPoint(3240, 3301, 0),
+                new WorldPoint(3241, 3302, 0),
+                new WorldPoint(3240, 3301, 0),
+                new WorldPoint(3241, 3302, 0)));
+    }
+
+    @Test
+    public void shouldClearInterimTarget_closeToCheckpoint_returnsTrue() {
+        assertTrue(Rs2Walker.shouldClearInterimTarget(
+                new WorldPoint(2890, 3396, 0),
+                new WorldPoint(2889, 3396, 0),
+                1_000L,
+                2_000L));
+    }
+
+    @Test
+    public void shouldClearInterimTarget_expiredCheckpoint_returnsTrue() {
+        assertTrue(Rs2Walker.shouldClearInterimTarget(
+                new WorldPoint(2890, 3396, 0),
+                new WorldPoint(2880, 3396, 0),
+                1_000L,
+                12_000L));
+    }
+
+    @Test
+    public void shouldClearInterimTarget_activeFarCheckpoint_returnsFalse() {
+        assertFalse(Rs2Walker.shouldClearInterimTarget(
+                new WorldPoint(2890, 3396, 0),
+                new WorldPoint(2880, 3396, 0),
+                1_000L,
+                5_000L));
     }
 
     @Test
