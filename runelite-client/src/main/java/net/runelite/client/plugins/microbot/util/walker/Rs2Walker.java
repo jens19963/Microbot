@@ -133,7 +133,7 @@ public class Rs2Walker {
 	private static final long PARTIAL_TRANS_RECAL_COOLDOWN_MS = 3500L;
 
 	private static final int INTERIM_CLOSE_TILES = 4;
-    private static final int INTERIM_PRECLICK_TILES = 9;
+    private static final int INTERIM_PRECLICK_TILES = 6;
 	private static final long INTERIM_PROGRESS_TIMEOUT_MS = 2500L;
 	private static final long INTERIM_MAX_AGE_MS = 10_000L;
 	private static final long INTERIM_RETARGET_COOLDOWN_MS = 900L;
@@ -212,6 +212,7 @@ public class Rs2Walker {
 
     /** After scene-object transport {@link #handleObject} — landing poll timeout + matching warn (cf. {@link #SHIP_NPC_BOAT_LANDING_WAIT_MS}). */
     private static final int POST_HANDLE_OBJECT_LANDING_WAIT_MS = 5_000;
+    private static final int POST_HANDLE_OBJECT_FAILED_SETTLE_MS = 800;
 
     /** Teleport “already near destination” skip in path loop — same semantics as prior {@code distanceTo2D &lt; 3}. */
     private static final int TELEPORT_NEAR_SKIP_CHEBYSHEV = 3;
@@ -1306,7 +1307,7 @@ public class Rs2Walker {
             primeExpectedTransportDestinations(path, indexOfStartPoint);
 
             lastPosition = Rs2Player.getWorldLocation();
-            boolean clearedInterimTarget = clearInterimTargetIfReachedOrExpired(lastPosition, System.currentTimeMillis());
+            boolean clearedInterimTarget = clearInterimTargetIfReachedOrExpired(lastPosition, path, System.currentTimeMillis());
             WorldPoint plImmediate = lastPosition;
 
             WorldPoint pathLastForImmediate = path.isEmpty() ? null : path.get(path.size() - 1);
@@ -1326,6 +1327,8 @@ public class Rs2Walker {
                     && !isDoorInteractionSettling()
                     && !isTransportInteractionSettling()
                     && tryIssueRouteContinuationClick(rawPath, path, target)) {
+                walkerDiag("tail exempt exitReason=interim-close-route-click tailBefore=%d", processWalkTail);
+                processWalkTail--;
                 continue;
             }
 
@@ -1961,7 +1964,10 @@ public class Rs2Walker {
                     markStartupPhase("click_candidate_found", target, "to=" + compactWorldPoint(clickTarget));
                     boolean clicked = Rs2Walker.walkMiniMap(clickTarget);
                     if (!clicked) {
-                        clicked = walkMiniMapToward(clickTarget, playerLoc, MINIMAP_REACH_EUCLIDEAN - 1);
+                        clicked = walkRawPathMiniMapToward(rawPath, clickTarget, playerLoc, MINIMAP_REACH_EUCLIDEAN - 1);
+                        if (!clicked && (rawPath == null || rawPath.isEmpty())) {
+                            clicked = walkMiniMapToward(clickTarget, playerLoc, MINIMAP_REACH_EUCLIDEAN - 1);
+                        }
                     }
                     if (walkCancelledDiag(target, "processWalk:after-minimap-click", processWalkTail)) {
                         return WalkerState.EXIT;
@@ -2435,6 +2441,32 @@ public class Rs2Walker {
         return walkMiniMap(worldPoint, 5);
     }
 
+    private static boolean isMiniMapClickable(WorldPoint worldPoint, double zoomDistance) {
+        if (worldPoint == null) {
+            return false;
+        }
+        if (Microbot.getClient().getMinimapZoom() != zoomDistance) {
+            Microbot.getClient().setMinimapZoom(zoomDistance);
+        }
+        Point point = Rs2MiniMap.worldToMinimap(worldPoint);
+        return point != null && (disableWalkerUpdate || Rs2MiniMap.isPointInsideMinimap(point));
+    }
+
+    private static boolean walkRawPathMiniMapToward(List<WorldPoint> rawPath,
+                                                    WorldPoint target,
+                                                    WorldPoint playerLoc,
+                                                    int maxEuclidean) {
+        WorldPoint fallback = findFurthestVisibleReachableRawPathPoint(rawPath, playerLoc, maxEuclidean);
+        if (fallback == null || fallback.equals(playerLoc) || fallback.equals(target)) {
+            return false;
+        }
+        if (walkMiniMap(fallback)) {
+            log.info("[Walker] Minimap click target {} was outside clip; used route fallback {}", target, fallback);
+            return true;
+        }
+        return false;
+    }
+
     static boolean walkMiniMapToward(WorldPoint target, WorldPoint playerLoc, int maxEuclidean) {
         if (target == null || playerLoc == null || target.getPlane() != playerLoc.getPlane()) {
             return false;
@@ -2518,6 +2550,37 @@ public class Rs2Walker {
                 break;
             }
             if (reachable.contains(candidate)) {
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    private static WorldPoint findFurthestVisibleReachableRawPathPoint(List<WorldPoint> rawPath,
+                                                                       WorldPoint playerLoc,
+                                                                       int maxEuclidean) {
+        if (rawPath == null || rawPath.isEmpty() || playerLoc == null) {
+            return null;
+        }
+        int closestRawIndex = getClosestTileIndex(rawPath);
+        if (closestRawIndex < 0) {
+            return null;
+        }
+
+        int maxSq = maxEuclidean * maxEuclidean;
+        Set<WorldPoint> reachable = Rs2Tile.getReachableTilesFromTile(playerLoc, Math.max(2, maxEuclidean)).keySet();
+        WorldPoint best = null;
+        for (int rawIndex = closestRawIndex; rawIndex < rawPath.size(); rawIndex++) {
+            WorldPoint candidate = rawPath.get(rawIndex);
+            if (candidate == null || candidate.getPlane() != playerLoc.getPlane()) {
+                break;
+            }
+            if (euclideanSq(candidate, playerLoc) > maxSq) {
+                break;
+            }
+            if (!candidate.equals(playerLoc)
+                    && reachable.contains(candidate)
+                    && isMiniMapClickable(candidate, 5)) {
                 best = candidate;
             }
         }
@@ -2620,10 +2683,14 @@ public class Rs2Walker {
             }
         }
 
-        boolean clicked = clickTarget != null
-                && !clickTarget.equals(playerLoc)
-                && (walkMiniMap(clickTarget)
-                || walkMiniMapToward(clickTarget, playerLoc, maxEuclidean - 1));
+        boolean clicked = false;
+        if (clickTarget != null && !clickTarget.equals(playerLoc)) {
+            clicked = walkMiniMap(clickTarget)
+                    || walkRawPathMiniMapToward(rawPath, clickTarget, playerLoc, maxEuclidean - 1);
+            if (!clicked && (rawPath == null || rawPath.isEmpty())) {
+                clicked = walkMiniMapToward(clickTarget, playerLoc, maxEuclidean - 1);
+            }
+        }
         log.info("[Walker] {}: clicked={} to={} player={} idx={}",
                 logLabel, clicked, clickTarget, playerLoc, targetIdx);
         if (!clicked) {
@@ -4615,7 +4682,11 @@ public class Rs2Walker {
         return afterTo <= 1 && afterTo < beforeTo;
     }
 
-    static boolean shouldClearInterimTarget(WorldPoint interim, WorldPoint playerLoc, long setAtMs, long nowMs) {
+    static boolean shouldClearInterimTarget(WorldPoint interim,
+                                            WorldPoint playerLoc,
+                                            long setAtMs,
+                                            long lastProgressAtMs,
+                                            long nowMs) {
         if (interim == null) {
             return false;
         }
@@ -4625,12 +4696,24 @@ public class Rs2Walker {
         if (playerLoc.distanceTo2D(interim) <= INTERIM_PRECLICK_TILES) {
             return true;
         }
+        if (lastProgressAtMs > 0L && nowMs - lastProgressAtMs > INTERIM_PROGRESS_TIMEOUT_MS) {
+            return true;
+        }
         return setAtMs > 0L && nowMs - setAtMs > INTERIM_MAX_AGE_MS;
     }
 
-    private static boolean clearInterimTargetIfReachedOrExpired(WorldPoint playerLoc, long nowMs) {
+    private static boolean clearInterimTargetIfReachedOrExpired(WorldPoint playerLoc,
+                                                                List<WorldPoint> path,
+                                                                long nowMs) {
         WorldPoint interim = interimTargetWp;
-        if (!shouldClearInterimTarget(interim, playerLoc, interimSetAtMs, nowMs)) {
+        if (interim != null && path != null && !path.isEmpty()) {
+            int bestIdxNow = getClosestTileIndex(path);
+            if (bestIdxNow > interimLastBestPathIdx) {
+                interimLastBestPathIdx = bestIdxNow;
+                interimLastProgressAtMs = nowMs;
+            }
+        }
+        if (!shouldClearInterimTarget(interim, playerLoc, interimSetAtMs, interimLastProgressAtMs, nowMs)) {
             return false;
         }
         String reason;
@@ -4638,6 +4721,8 @@ public class Rs2Walker {
             reason = "invalid";
         } else if (playerLoc.distanceTo2D(interim) <= INTERIM_PRECLICK_TILES) {
             reason = "close";
+        } else if (interimLastProgressAtMs > 0L && nowMs - interimLastProgressAtMs > INTERIM_PROGRESS_TIMEOUT_MS) {
+            reason = "stale-progress";
         } else {
             reason = "expired";
         }
@@ -6879,11 +6964,11 @@ public class Rs2Walker {
                         if (destWait == null) {
                             return false;
                         }
-                        boolean landedAfterObject = sleepUntil(() -> isPlayerWithinChebyshevInclusive(destWait, maxInclusive),
-                                POST_HANDLE_OBJECT_LANDING_WAIT_MS);
+                        boolean landedAfterObject = waitForPostHandleObjectLanding(transport, object, destWait,
+                                maxInclusive);
                         if (!landedAfterObject) {
                             WebWalkLog.spWarn(
-                                    "post-handleObject landing wait timed out ({}ms) dest={} at={}",
+                                    "post-handleObject landing unresolved (timeout={}ms) dest={} at={}",
                                     POST_HANDLE_OBJECT_LANDING_WAIT_MS,
                                     compactWorldPoint(destWait),
                                     compactWorldPoint(Rs2Player.getWorldLocation()));
@@ -6898,6 +6983,45 @@ public class Rs2Walker {
             }
         }
         return false;
+    }
+
+    private static boolean waitForPostHandleObjectLanding(Transport transport,
+                                                          TileObject object,
+                                                          WorldPoint destWait,
+                                                          int maxInclusive) {
+        long waitStartedAt = System.currentTimeMillis();
+        AtomicBoolean settledAwayFromAdjacentDestination = new AtomicBoolean(false);
+        boolean completed = sleepUntil(() -> {
+            if (isPlayerWithinChebyshevInclusive(destWait, maxInclusive)) {
+                return true;
+            }
+            if (!isAdjacentSamePlaneTransport(transport)
+                    || System.currentTimeMillis() - waitStartedAt < POST_HANDLE_OBJECT_FAILED_SETTLE_MS) {
+                return false;
+            }
+            WorldPoint playerLoc = Rs2Player.getWorldLocation();
+            if (playerLoc == null || destWait == null || playerLoc.getPlane() != destWait.getPlane()
+                    || Rs2Player.isMoving() || Rs2Player.isAnimating()) {
+                return false;
+            }
+            WorldPoint origin = transport == null ? null : transport.getOrigin();
+            WorldPoint objectLoc = object == null ? null : object.getWorldLocation();
+            boolean settledAwayFromOrigin = origin != null && playerLoc.distanceTo2D(origin) > 1;
+            boolean settledAwayFromObject = objectLoc != null && playerLoc.distanceTo2D(objectLoc) > 1;
+            if (playerLoc.distanceTo2D(destWait) > Math.max(1, maxInclusive)
+                    && (settledAwayFromOrigin || settledAwayFromObject)) {
+                settledAwayFromAdjacentDestination.set(true);
+                return true;
+            }
+            return false;
+        }, POST_HANDLE_OBJECT_LANDING_WAIT_MS);
+
+        if (settledAwayFromAdjacentDestination.get()) {
+            WebWalkLog.spInfo("post-handleObject adjacent landing failed | dest={} at={}",
+                    compactWorldPoint(destWait), compactWorldPoint(Rs2Player.getWorldLocation()));
+            return false;
+        }
+        return completed;
     }
 
     /**

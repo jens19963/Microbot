@@ -466,6 +466,7 @@ public class Rs2WalkerUnitTest {
                 new WorldPoint(2890, 3396, 0),
                 new WorldPoint(2889, 3396, 0),
                 1_000L,
+                1_500L,
                 2_000L));
     }
 
@@ -475,7 +476,18 @@ public class Rs2WalkerUnitTest {
                 new WorldPoint(2890, 3396, 0),
                 new WorldPoint(2880, 3396, 0),
                 1_000L,
+                1_500L,
                 12_000L));
+    }
+
+    @Test
+    public void shouldClearInterimTarget_staleProgress_returnsTrue() {
+        assertTrue(Rs2Walker.shouldClearInterimTarget(
+                new WorldPoint(2890, 3396, 0),
+                new WorldPoint(2880, 3396, 0),
+                1_000L,
+                1_500L,
+                5_000L));
     }
 
     @Test
@@ -484,6 +496,7 @@ public class Rs2WalkerUnitTest {
                 new WorldPoint(2890, 3396, 0),
                 new WorldPoint(2880, 3396, 0),
                 1_000L,
+                4_500L,
                 5_000L));
     }
 
