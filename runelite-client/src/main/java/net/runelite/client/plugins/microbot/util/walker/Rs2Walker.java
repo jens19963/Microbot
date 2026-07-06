@@ -6964,8 +6964,7 @@ public class Rs2Walker {
                         if (destWait == null) {
                             return false;
                         }
-                        boolean landedAfterObject = waitForPostHandleObjectLanding(transport, object, destWait,
-                                maxInclusive);
+                        boolean landedAfterObject = waitForPostHandleObjectLanding(transport, destWait, maxInclusive);
                         if (!landedAfterObject) {
                             WebWalkLog.spWarn(
                                     "post-handleObject landing unresolved (timeout={}ms) dest={} at={}",
@@ -6986,7 +6985,6 @@ public class Rs2Walker {
     }
 
     private static boolean waitForPostHandleObjectLanding(Transport transport,
-                                                          TileObject object,
                                                           WorldPoint destWait,
                                                           int maxInclusive) {
         long waitStartedAt = System.currentTimeMillis();
@@ -7005,11 +7003,9 @@ public class Rs2Walker {
                 return false;
             }
             WorldPoint origin = transport == null ? null : transport.getOrigin();
-            WorldPoint objectLoc = object == null ? null : object.getWorldLocation();
             boolean settledAwayFromOrigin = origin != null && playerLoc.distanceTo2D(origin) > 1;
-            boolean settledAwayFromObject = objectLoc != null && playerLoc.distanceTo2D(objectLoc) > 1;
             if (playerLoc.distanceTo2D(destWait) > Math.max(1, maxInclusive)
-                    && (settledAwayFromOrigin || settledAwayFromObject)) {
+                    && settledAwayFromOrigin) {
                 settledAwayFromAdjacentDestination.set(true);
                 return true;
             }
