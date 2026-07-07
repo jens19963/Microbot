@@ -376,6 +376,41 @@ public class Rs2WalkerUnitTest {
     }
 
     @Test
+    public void findForwardRecoveryIndex_prefersLaterReachableSwitchbackBranch() {
+        WorldPoint player = new WorldPoint(1000, 1000, 0);
+        List<WorldPoint> path = Arrays.asList(
+                new WorldPoint(998, 1000, 0),
+                new WorldPoint(999, 1000, 0),
+                new WorldPoint(1000, 1001, 0),
+                new WorldPoint(1015, 1000, 0),
+                new WorldPoint(1016, 1001, 0),
+                new WorldPoint(1002, 1002, 0),
+                new WorldPoint(1003, 1001, 0));
+        Set<WorldPoint> reachable = new HashSet<>(Arrays.asList(
+                new WorldPoint(1002, 1002, 0),
+                new WorldPoint(1003, 1001, 0)));
+
+        int idx = Rs2Walker.findForwardRecoveryIndex(path, 3, player, 13, reachable, wp -> true);
+
+        assertEquals("recovery should scan forward before falling back to an earlier branch", 6, idx);
+    }
+
+    @Test
+    public void findFurthestClickableIndex_canReturnEarlierSwitchbackBranch() {
+        WorldPoint player = new WorldPoint(1000, 1000, 0);
+        List<WorldPoint> path = Arrays.asList(
+                new WorldPoint(998, 1000, 0),
+                new WorldPoint(999, 1000, 0),
+                new WorldPoint(1000, 1001, 0),
+                new WorldPoint(1015, 1000, 0),
+                new WorldPoint(1016, 1001, 0));
+
+        int idx = Rs2Walker.findFurthestClickableIndex(path, 3, player, wp -> false, 13);
+
+        assertEquals("generic fallback is allowed to backtrack; recovery clamps this at the call site", 2, idx);
+    }
+
+    @Test
     public void interpolateClickableTarget_usesInterpolatedPointWhenUsable() {
         WorldPoint player = new WorldPoint(3200, 3200, 0);
         WorldPoint fallback = new WorldPoint(3206, 3200, 0);
@@ -518,6 +553,12 @@ public class Rs2WalkerUnitTest {
                 1_000L,
                 4_500L,
                 5_000L));
+    }
+
+    @Test
+    public void interimPreclickTiles_runHandsOffEarlierThanWalk() {
+        assertEquals(6, Rs2Walker.interimPreclickTiles(false));
+        assertEquals(11, Rs2Walker.interimPreclickTiles(true));
     }
 
     @Test

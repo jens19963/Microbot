@@ -134,7 +134,8 @@ public class Rs2Walker {
 
 	private static final int INTERIM_CLOSE_TILES = 4;
 	private static final int INTERIM_PRECLICK_TILES = 6;
-	private static final int INTERIM_RUN_PRECLICK_TILES = 9;
+	private static final int INTERIM_RUN_PRECLICK_TILES = 11;
+	private static final int INTERIM_MOVING_POLL_MS = 450;
 	private static final long INTERIM_PROGRESS_TIMEOUT_MS = 2500L;
 	private static final long INTERIM_MAX_AGE_MS = 10_000L;
 	private static final long INTERIM_RETARGET_COOLDOWN_MS = 900L;
@@ -162,6 +163,7 @@ public class Rs2Walker {
     private static final int UNREACHABLE_DOOR_RECOVERY_LOOKAHEAD_EDGES = 10;
     private static final int STALL_RECOVERY_MINIMAP_REACH_EUCLIDEAN = 10;
     private static final int NORMAL_MINIMAP_REACH_EUCLIDEAN = 12;
+    private static final int UNREACHABLE_RECOVERY_FORWARD_SCAN_TILES = 24;
     private static final long ACTIVE_ROUTE_IDLE_NUDGE_MS = 2_500L;
 	private static final long ACTIVE_ROUTE_IDLE_NUDGE_COOLDOWN_MS = 2_000L;
 	private static final long POST_TRANSPORT_PATH_TMARK_WINDOW_MS = 15_000L;
@@ -173,6 +175,7 @@ public class Rs2Walker {
     private static final int POST_TRANSPORT_RAW_SCAN_TRANSPORT_LOOKAHEAD_EDGES = 6;
     private static final int POST_TRANSPORT_RAW_SCAN_TRANSPORT_MAX_DIST = 15;
     private static final long TRANSPORT_POST_INTERACT_SETTLE_MS = 900L;
+    private static final long RECENT_TRANSPORT_EDGE_SUPPRESS_MS = 8_000L;
     private static volatile Integer rawScanFocusedDoorIdx = null;
     private static volatile long rawScanFocusedDoorSetAtMs = 0L;
     private static volatile int rawScanFocusedDoorAttempts = 0;
@@ -184,6 +187,7 @@ public class Rs2Walker {
     private static volatile long lastTransportHandledAtMs = 0L;
     private static volatile WorldPoint lastTransportHandledAtLocation = null;
     private static volatile WorldPoint lastTransportOriginLocation = null;
+    private static volatile WorldPoint lastTransportDestinationLocation = null;
     private static volatile WorldPoint idleNudgeLastObservedLocation = null;
     private static volatile long idleNudgeStationarySinceMs = 0L;
     private static volatile long lastActiveRouteIdleNudgeAtMs = 0L;
@@ -262,6 +266,7 @@ public class Rs2Walker {
         startupPhasesLogged.clear();
         lastTransportHandledAtLocation = null;
         lastTransportOriginLocation = null;
+        lastTransportDestinationLocation = null;
         resetRouteProgress();
         synchronized (expectedTransportDestinations) {
             expectedTransportDestinations.clear();
@@ -705,6 +710,10 @@ public class Rs2Walker {
         SEASONAL_HANDLER_MISS_LOGGED_COUNT.set(0);
         WORLD_MAP_REMOVE_NULL_LOGGED.set(false);
         recentCurrentTileTransportByEdge.clear();
+        lastTransportHandledAtMs = 0L;
+        lastTransportHandledAtLocation = null;
+        lastTransportOriginLocation = null;
+        lastTransportDestinationLocation = null;
         resetRouteProgress();
     }
 
@@ -1302,7 +1311,9 @@ public class Rs2Walker {
                 }
             }
 
-            int indexOfStartPoint = stabilizeRouteProgressIndex(path, getClosestTileIndex(path), target, Rs2Player.getWorldLocation());
+            WorldPoint playerLocForIndex = Rs2Player.getWorldLocation();
+            int indexOfStartPoint = stabilizeRouteProgressIndex(path, getClosestTileIndex(path), target, playerLocForIndex);
+            indexOfStartPoint = advanceIndexPastRecentTransportEdge(path, indexOfStartPoint, playerLocForIndex);
             if (indexOfStartPoint == -1) {
                 walkerDiag("getClosestTileIndex=-1 pathSize=%d player=%s pathFirst=%s pathLast=%s",
                         path.size(),
@@ -1404,8 +1415,10 @@ public class Rs2Walker {
                         "reason=no_nearby_planned_transport");
             }
             long rawSceneStartAt = System.currentTimeMillis();
+            // After a handled transport, let the main path loop dispatch the next planned transport.
+            // Broad raw transport scans can enter long false-negative waits before returning handled=false.
             boolean rawSceneHandled = allowRawSceneScan
-                    && handleNearbyRawPathSceneObjects(rawPath, HANDLER_RANGE, target);
+                    && handleNearbyRawPathSceneObjects(rawPath, HANDLER_RANGE, target, !postTransportWindow);
             tmarkPostTransport("post_transport_raw_scene_scan", target,
                     "handled=" + rawSceneHandled + " ms=" + (System.currentTimeMillis() - rawSceneStartAt));
             if (rawSceneHandled) {
@@ -1709,13 +1722,18 @@ public class Rs2Walker {
                             // (no reachability gate on the click); isKnownWalkableOrUnloaded only keeps
                             // us from clicking into a known wall, it is NOT the bounded BFS check.
                             final int RECOVERY_MINIMAP_REACH_EUCLIDEAN = 13;
-                            int recoverIdx = findFurthestClickableIndex(path, i, playerLoc,
-                                    wp -> {
-                                        Set<Transport> ts = ShortestPathPlugin.getTransports().get(wp);
-                                        return ts != null && !ts.isEmpty();
-                                    },
+                            int recoverIdx = findForwardReachableRecoveryIndex(path, i, playerLoc,
                                     RECOVERY_MINIMAP_REACH_EUCLIDEAN);
-                            recoverIdx = Math.min(Math.max(recoverIdx, indexOfStartPoint), path.size() - 1);
+                            if (recoverIdx < 0) {
+                                recoverIdx = findFurthestClickableIndex(path, i, playerLoc,
+                                        wp -> {
+                                            Set<Transport> ts = ShortestPathPlugin.getTransports().get(wp);
+                                            return ts != null && !ts.isEmpty();
+                                        },
+                                        RECOVERY_MINIMAP_REACH_EUCLIDEAN);
+                            }
+                            int minRecoveryIdx = Math.max(indexOfStartPoint, i);
+                            recoverIdx = Math.min(Math.max(recoverIdx, minRecoveryIdx), path.size() - 1);
                             WorldPoint recoverTarget = path.get(recoverIdx);
                             if (euclideanSq(recoverTarget, playerLoc)
                                     > RECOVERY_MINIMAP_REACH_EUCLIDEAN * RECOVERY_MINIMAP_REACH_EUCLIDEAN) {
@@ -1734,7 +1752,7 @@ public class Rs2Walker {
                             if (dangerCfg != null && dangerCfg.isAvoidDangerousNpcs() && recoverTarget != null
                                     && dangerCfg.isDangerousAdjacentTile(WorldPointUtil.packWorldPoint(recoverTarget))) {
                                 int safeIdx = recoverIdx;
-                                while (safeIdx > indexOfStartPoint
+                                while (safeIdx > minRecoveryIdx
                                         && dangerCfg.isDangerousAdjacentTile(WorldPointUtil.packWorldPoint(path.get(safeIdx)))) {
                                     safeIdx--;
                                 }
@@ -1834,7 +1852,7 @@ public class Rs2Walker {
 								sleepUntil(() ->
 												interimFinal.distanceTo2D(Rs2Player.getWorldLocation()) <= interimPreclickTiles()
 														|| !Rs2Player.isMoving(),
-										650);
+										INTERIM_MOVING_POLL_MS);
                                 WorldPoint posAfterWait = Rs2Player.getWorldLocation();
 								if ((posAfterWait != null && posBeforeWait.distanceTo2D(posAfterWait) > 0)
                                         || Rs2Player.isMoving()) {
@@ -3602,6 +3620,13 @@ public class Rs2Walker {
     }
 
     private static boolean handleNearbyRawPathSceneObjects(List<WorldPoint> rawPath, int handlerRange, WorldPoint target) {
+        return handleNearbyRawPathSceneObjects(rawPath, handlerRange, target, true);
+    }
+
+    private static boolean handleNearbyRawPathSceneObjects(List<WorldPoint> rawPath,
+                                                          int handlerRange,
+                                                          WorldPoint target,
+                                                          boolean allowTransportHandlers) {
         if (rawPath == null || rawPath.size() < 2) {
             return false;
         }
@@ -3651,7 +3676,7 @@ public class Rs2Walker {
                 continue;
             }
 
-            if (hasExplicitTransportStep(rawPath, i)) {
+            if (allowTransportHandlers && hasExplicitTransportStep(rawPath, i)) {
                 WorldPoint before = Rs2Player.getWorldLocation();
                 WorldPoint expectedDestination = i + 1 < rawPath.size() ? rawPath.get(i + 1) : null;
                 if (handleTransports(rawPath, i)) {
@@ -3939,6 +3964,62 @@ public class Rs2Walker {
             bestIdx = j;
         }
         return bestIdx;
+    }
+
+    private static int findForwardReachableRecoveryIndex(List<WorldPoint> path,
+                                                         int startIdx,
+                                                         WorldPoint playerLoc,
+                                                         int maxEuclidean) {
+        Set<WorldPoint> reachable = playerLoc == null
+                ? Collections.emptySet()
+                : Rs2Tile.getReachableTilesFromTile(playerLoc, Math.max(2, maxEuclidean)).keySet();
+        return findForwardRecoveryIndex(
+                path,
+                startIdx,
+                playerLoc,
+                maxEuclidean,
+                reachable,
+                Rs2Walker::isMiniMapRecoveryClickable);
+    }
+
+    static int findForwardRecoveryIndex(List<WorldPoint> path,
+                                        int startIdx,
+                                        WorldPoint playerLoc,
+                                        int maxEuclidean,
+                                        Set<WorldPoint> reachable,
+                                        java.util.function.Predicate<WorldPoint> isClickable) {
+        if (path == null || path.isEmpty() || playerLoc == null || startIdx < 0 || startIdx >= path.size()) {
+            return -1;
+        }
+        int maxSq = maxEuclidean * maxEuclidean;
+        int endExclusive = Math.min(path.size(), startIdx + UNREACHABLE_RECOVERY_FORWARD_SCAN_TILES + 1);
+        int bestIdx = -1;
+        int bestDistFromPlayer = Integer.MAX_VALUE;
+        for (int idx = startIdx; idx < endExclusive; idx++) {
+            WorldPoint candidate = path.get(idx);
+            if (candidate == null || candidate.getPlane() != playerLoc.getPlane()) {
+                continue;
+            }
+            if (candidate.equals(playerLoc) || euclideanSq(candidate, playerLoc) > maxSq) {
+                continue;
+            }
+            if (reachable != null && !reachable.isEmpty() && !reachable.contains(candidate)) {
+                continue;
+            }
+            if (isClickable != null && !isClickable.test(candidate)) {
+                continue;
+            }
+            int distFromPlayer = euclideanSq(candidate, playerLoc);
+            if (bestIdx < 0 || idx > bestIdx || (idx == bestIdx && distFromPlayer > bestDistFromPlayer)) {
+                bestIdx = idx;
+                bestDistFromPlayer = distFromPlayer;
+            }
+        }
+        return bestIdx;
+    }
+
+    private static boolean isMiniMapRecoveryClickable(WorldPoint worldPoint) {
+        return isMiniMapClickable(worldPoint, 5);
     }
 
     static WorldPoint interpolateClickableTarget(List<WorldPoint> path,
@@ -4696,10 +4777,14 @@ public class Rs2Walker {
 
     private static int interimPreclickTiles() {
         try {
-            return Rs2Player.isRunEnabled() ? INTERIM_RUN_PRECLICK_TILES : INTERIM_PRECLICK_TILES;
+            return interimPreclickTiles(Rs2Player.isRunEnabled());
         } catch (Exception e) {
             return INTERIM_PRECLICK_TILES;
         }
+    }
+
+    static int interimPreclickTiles(boolean runEnabled) {
+        return runEnabled ? INTERIM_RUN_PRECLICK_TILES : INTERIM_PRECLICK_TILES;
     }
 
     static boolean shouldClearInterimTarget(WorldPoint interim,
@@ -5853,6 +5938,15 @@ public class Rs2Walker {
         int bestScore = bestComponent.score;
         WorldPoint bestFrom = chosen.from;
         WorldPoint bestTo = chosen.to;
+        if (isRecentTransportEdgeCandidate(chosen.location, bestFrom, bestTo)) {
+            WebWalkLog.spInfo("path_adj_recent_transport_skip | probe={} from={} to={} origin={} dest={}",
+                    compactWorldPoint(chosen.location),
+                    compactWorldPoint(bestFrom),
+                    compactWorldPoint(bestTo),
+                    compactWorldPoint(lastTransportOriginLocation),
+                    compactWorldPoint(lastTransportDestinationLocation));
+            return false;
+        }
 		log.info("[Walker] path-adj blocker-scan: score={} action={} at {}", bestScore, (bestAction == null || bestAction.isEmpty()) ? "<default>" : bestAction, chosen.location);
 		WorldPoint bestLoc = chosen.location;
 		if (shouldThrottleDoorAttempt(bestLoc, bestFrom, bestTo)) {
@@ -6448,6 +6542,33 @@ public class Rs2Walker {
         return routeProgressIdx;
     }
 
+    static int advanceIndexPastRecentTransportEdge(List<WorldPoint> path, int index, WorldPoint playerLoc) {
+        if (path == null || path.isEmpty() || index < 0 || index >= path.size()
+                || !isRecentTransportEdgeWindow()) {
+            return index;
+        }
+        WorldPoint origin = lastTransportOriginLocation;
+        WorldPoint destination = lastTransportDestinationLocation;
+        if (origin == null || destination == null || playerLoc == null
+                || playerLoc.getPlane() != destination.getPlane()
+                || playerLoc.distanceTo2D(destination) > 3) {
+            return index;
+        }
+
+        int scanEndExclusive = Math.min(path.size(), index + 8);
+        int lastTransportEdgeIdx = -1;
+        for (int i = index; i < scanEndExclusive; i++) {
+            WorldPoint point = path.get(i);
+            if (isNearSamePlane(point, origin, 2) || isNearSamePlane(point, destination, 2)) {
+                lastTransportEdgeIdx = i;
+            }
+        }
+        if (lastTransportEdgeIdx >= index && lastTransportEdgeIdx + 1 < path.size()) {
+            return lastTransportEdgeIdx + 1;
+        }
+        return index;
+    }
+
     private static int closestForwardPathIndex(List<WorldPoint> path, int fromIdx, WorldPoint playerLoc) {
         if (path == null || path.isEmpty() || playerLoc == null || fromIdx < 0 || fromIdx >= path.size()) {
             return -1;
@@ -6475,6 +6596,43 @@ public class Rs2Walker {
         routeProgressPathStart = null;
         routeProgressPathEnd = null;
         routeProgressPathSize = -1;
+    }
+
+    private static boolean isRecentTransportEdgeWindow() {
+        long handledAt = lastTransportHandledAtMs;
+        if (handledAt <= 0L) {
+            return false;
+        }
+        long ageMs = System.currentTimeMillis() - handledAt;
+        return ageMs >= 0L && ageMs <= RECENT_TRANSPORT_EDGE_SUPPRESS_MS;
+    }
+
+    private static boolean isNearSamePlane(WorldPoint a, WorldPoint b, int distance) {
+        return a != null
+                && b != null
+                && a.getPlane() == b.getPlane()
+                && a.distanceTo2D(b) <= distance;
+    }
+
+    private static boolean isRecentTransportEdgeCandidate(WorldPoint objectLoc, WorldPoint from, WorldPoint to) {
+        if (!isRecentTransportEdgeWindow()) {
+            return false;
+        }
+        WorldPoint origin = lastTransportOriginLocation;
+        WorldPoint destination = lastTransportDestinationLocation;
+        if (origin == null || destination == null) {
+            return false;
+        }
+        boolean objectNearTransport = isNearSamePlane(objectLoc, origin, 2)
+                || isNearSamePlane(objectLoc, destination, 2);
+        boolean edgeMatchesTransport = (isNearSamePlane(from, origin, 2) && isNearSamePlane(to, destination, 2))
+                || (isNearSamePlane(from, destination, 2) && isNearSamePlane(to, origin, 2))
+                || (objectNearTransport
+                && (isNearSamePlane(from, origin, 2)
+                || isNearSamePlane(from, destination, 2)
+                || isNearSamePlane(to, origin, 2)
+                || isNearSamePlane(to, destination, 2)));
+        return objectNearTransport && edgeMatchesTransport;
     }
 
     /**
@@ -7336,6 +7494,7 @@ public class Rs2Walker {
         lastTransportHandledAtMs = handoffStartedAt;
         lastTransportHandledAtLocation = Rs2Player.getWorldLocation();
         lastTransportOriginLocation = transport != null ? transport.getOrigin() : null;
+        lastTransportDestinationLocation = transport != null ? transport.getDestination() : null;
         WorldPoint goal = currentTarget;
         WorldPoint transportDest = transport != null ? transport.getDestination() : null;
         boolean expectedTransport = consumeExpectedTransportDestination(transportDest);
