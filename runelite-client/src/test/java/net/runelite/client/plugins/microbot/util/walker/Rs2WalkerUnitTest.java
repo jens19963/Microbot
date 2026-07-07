@@ -356,6 +356,26 @@ public class Rs2WalkerUnitTest {
     }
 
     @Test
+    public void stabilizeRouteProgressIndex_doesNotJumpBackToEarlierSwitchbackBranch() {
+        WorldPoint target = new WorldPoint(3200, 3201, 0);
+        List<WorldPoint> path = Arrays.asList(
+                new WorldPoint(3200, 3200, 0),
+                new WorldPoint(3201, 3200, 0),
+                new WorldPoint(3202, 3200, 0),
+                new WorldPoint(3203, 3200, 0),
+                new WorldPoint(3203, 3201, 0),
+                new WorldPoint(3202, 3201, 0),
+                new WorldPoint(3201, 3201, 0),
+                target);
+
+        assertEquals(5, Rs2Walker.stabilizeRouteProgressIndex(path, 5, target, new WorldPoint(3202, 3201, 0)));
+        assertEquals("nearby earlier branch must not become the active route index",
+                5,
+                Rs2Walker.stabilizeRouteProgressIndex(path, 2, target, new WorldPoint(3202, 3201, 0)));
+        assertEquals(6, Rs2Walker.stabilizeRouteProgressIndex(path, 6, target, new WorldPoint(3201, 3201, 0)));
+    }
+
+    @Test
     public void interpolateClickableTarget_usesInterpolatedPointWhenUsable() {
         WorldPoint player = new WorldPoint(3200, 3200, 0);
         WorldPoint fallback = new WorldPoint(3206, 3200, 0);
