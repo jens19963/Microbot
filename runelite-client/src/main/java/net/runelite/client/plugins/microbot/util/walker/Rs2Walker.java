@@ -2625,14 +2625,16 @@ public class Rs2Walker {
         if (playerLoc == null || path == null || path.isEmpty()) {
             return false;
         }
-        int rawIdx = getClosestTileIndex(rawPath);
-        if (rawIdx >= 0 && hasUnresolvedDoorLikeObjectNearRawPath(rawPath,
-                rawIdx,
-                playerLoc,
-                UNREACHABLE_DOOR_RECOVERY_BACKTRACK_EDGES,
-                UNREACHABLE_DOOR_RECOVERY_LOOKAHEAD_EDGES,
-                HANDLER_RANGE)) {
-            return false;
+        if (rawPath != null && !rawPath.isEmpty()) {
+            int rawIdx = getClosestTileIndex(rawPath);
+            if (rawIdx >= 0 && hasUnresolvedDoorLikeObjectNearRawPath(rawPath,
+                    rawIdx,
+                    playerLoc,
+                    UNREACHABLE_DOOR_RECOVERY_BACKTRACK_EDGES,
+                    UNREACHABLE_DOOR_RECOVERY_LOOKAHEAD_EDGES,
+                    HANDLER_RANGE)) {
+                return false;
+            }
         }
         int pathIdx = Math.max(0, getClosestTileIndex(path));
         if (hasUpcomingNearbyTransportStep(path, pathIdx, playerLoc,
@@ -2710,9 +2712,10 @@ public class Rs2Walker {
         if (markRecoveryCooldown) {
             lastUnreachableRecoveryClickAtMs = interimSetAtMs;
         }
-        lastMovedTimeMs = interimSetAtMs;
         if ("active route idle nudge".equals(logLabel)) {
             lastActiveRouteIdleNudgeAtMs = interimSetAtMs;
+        } else {
+            lastMovedTimeMs = interimSetAtMs;
         }
         idleNudgeStationarySinceMs = interimSetAtMs;
         idleNudgeLastObservedLocation = playerLoc;
@@ -4474,7 +4477,7 @@ public class Rs2Walker {
         if (!nearProbe && !onSegment) {
             return false;
         }
-        ObjectComposition composition = Rs2GameObject.convertToObjectComposition(object);
+        ObjectComposition composition = resolveCompositionForDoorProbe(object);
         String currentAction = getDoorAction(composition, doorActions);
         return currentAction != null && currentAction.equalsIgnoreCase(action);
     }
@@ -4987,11 +4990,7 @@ public class Rs2Walker {
         if (action == null) {
             return false;
         }
-        String al = action.toLowerCase(Locale.ROOT);
-        return al.startsWith("open")
-                || al.startsWith("pass")
-                || al.startsWith("go-through")
-                || al.startsWith("walk-through");
+        return doorActionPriorityIndex(action) != Integer.MAX_VALUE;
     }
 
     /**
