@@ -1253,8 +1253,10 @@ public class Rs2Walker {
                 setTarget(null, "rs2walker:processWalk:reached-path-endpoint");
             }
 
+            boolean shouldIssueActiveRouteIdleNudge = shouldIssueActiveRouteIdleNudge();
             long nowTickGraceMs = System.currentTimeMillis();
             if (lastAttemptedMinimapClickOk && lastAttemptedMinimapClickAtMs > 0L
+                    && !shouldIssueActiveRouteIdleNudge
                     && nowTickGraceMs - lastAttemptedMinimapClickAtMs < MINIMAP_CLICK_STALL_GRACE_MS) {
                 lastMovedTimeMs = nowTickGraceMs;
             }
@@ -1262,10 +1264,6 @@ public class Rs2Walker {
             checkIfStuck();
             if (walkCancelledDiag(target, "processWalk:after-stuck-check", processWalkTail)) {
                 return WalkerState.EXIT;
-            }
-            if (shouldIssueActiveRouteIdleNudge()
-                    && tryIssueRouteRecoveryClick(rawPath, path, target, "active route idle nudge")) {
-                continue;
             }
             if (isStuckTooLong()) {
 				// Leagues area teleports can have long animations. Never trigger stall-recalc
@@ -1294,6 +1292,13 @@ public class Rs2Walker {
                 if (!Rs2Player.isMoving() && !Rs2Player.isAnimating() && !Rs2Player.isInteracting()) {
                     tryIssueRouteRecoveryClick(rawPath, path, target, "stall recovery click");
                 }
+                continue;
+            }
+            if (shouldIssueActiveRouteIdleNudge
+                    && tryIssueRouteRecoveryClick(rawPath, path, target, "active route idle nudge")) {
+                lastAttemptedMinimapClick = null;
+                lastAttemptedMinimapClickOk = false;
+                lastAttemptedMinimapClickAtMs = 0L;
                 continue;
             }
             if (stuckCount > 10) {
